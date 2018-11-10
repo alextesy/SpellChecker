@@ -1,11 +1,14 @@
 import codecs
 import collections
+import math
+import operator
 import re
 import sys
 from collections import defaultdict,Counter
 
 from nltk import ngrams,tokenize
 from nltk.ccg.chart import lex
+from nltk.misc import word_finder
 
 
 def proccess_file(file,flag=None):
@@ -118,12 +121,15 @@ def create_word_list(file_list):
         corpus.append(proccess_file(file))
     words = [re.findall(r"[\w']+|[\'\".,!?;#]", i) for i in corpus]
     temp = []
-    for x in words:
+    for index,x in enumerate(words):
         temp += ['<END>', '<START>']
         for y in x:
             normalized_word = normalization(y)
             if normalized_word:
                 temp.append(normalized_word)  # Normalizing each token see the function for the full doc
+
+        if index+1==len(words):
+            temp += ['<END>', '<START>']
     return temp
 
 def learn_language_model(files, n=3, lm=None):
@@ -209,6 +215,8 @@ def create_letter_count(lexicon):
 def create_error_distribution(errors_files, lexicon):
     corpus = []
     distribution_dict=create_letter_count(lexicon)
+    total_count=sum(lexicon.values())
+
     for file in errors_files:
         corpus.append(proccess_file(file,'errors'))
     flat_list = [item.replace('\n','') for sublist in corpus for item in sublist]
@@ -219,14 +227,14 @@ def create_error_distribution(errors_files, lexicon):
         corr=corr.replace(' ','') if corr.startswith(' ') else corr
 
         if len(err)<len(corr):
-            count=distribution_dict[''.join(diff_del(err,corr))[::-1]] if distribution_dict[''.join(diff_del(err,corr))[::-1]]>0 else 100000 #TODO: better smothing
+            count=distribution_dict[''.join(diff_del(err,corr))[::-1]] if distribution_dict[''.join(diff_del(err,corr))[::-1]]>0 else total_count #TODO: better smothing
             error_dict['deletion'][diff_del(err,corr)]+=1/count
         elif len(err)>len(corr):
-            count = distribution_dict[diff_insertion(err,corr)[1]] if distribution_dict[diff_insertion(err,corr)[1]] > 0 else 100000
+            count = distribution_dict[diff_insertion(err,corr)[1]] if distribution_dict[diff_insertion(err,corr)[1]] > 0 else total_count
             error_dict['insertion'][diff_insertion(corr,err)]+=1/count
         else:
             if set(err)!=set(corr):
-                count = distribution_dict[diff_sub(err, corr)[1]] if distribution_dict[diff_sub(err, corr)[1]] > 0 else 100000
+                count = distribution_dict[diff_sub(err, corr)[1]] if distribution_dict[diff_sub(err, corr)[1]] > 0 else total_count
                 error_dict['substitution'][diff_sub(err, corr)] += 1/count
             else:
                 flag=True
@@ -234,17 +242,19 @@ def create_error_distribution(errors_files, lexicon):
                 corr_counter=Counter(corr)
                 for k_err,v_err in err_counter.items():
                     if v_err!=corr_counter[k_err]:
-                        count=distribution_dict[diff_sub(err,corr)[1]] if distribution_dict[diff_sub(err,corr)[1]]>0 else 100000
+                        count=distribution_dict[diff_sub(err,corr)[1]] if distribution_dict[diff_sub(err,corr)[1]]>0 else total_count
                         error_dict['substitution'][diff_sub(err, corr)] += 1/count
                         flag=False
                         break
                 if flag:
-                    count=distribution_dict[diff_trans(err,corr)[1]] if distribution_dict[diff_trans(err,corr)[1]]>0 else 100000
+                    count=distribution_dict[diff_trans(err,corr)[1]] if distribution_dict[diff_trans(err,corr)[1]]>0 else total_count
                     error_dict['transposition'][diff_trans(err, corr)] += 1/count
 
 
 
     return error_dict
+
+
 
     """ Returns a dictionary {str:dict} where str is in:
     <'deletion', 'insertion', 'transposition', 'substitution'> and the inner dict {tupple: float} represents the confution matrix of the specific errors
@@ -267,8 +277,70 @@ def create_error_distribution(errors_files, lexicon):
 
     """
 
+def levenshteinDistance(s1, s2):
+    if len(s1) > len(s2):
+        s1, s2 = s2, s1
+    distances = range(len(s1) + 1)
+    for i2, c2 in enumerate(s2):
+        distances_ = [i2+1]
+        for i1, c1 in enumerate(s1):
+            if c1 == c2:
+                distances_.append(distances[i1])
+            else:
+                if i1+1<len(s1) and i2+1<len(s2):
+                    if c1==s2[i2+1] and c2==s1[i1+1]:
+                        return 1
+                distances_.append(1 + min((distances[i1], distances[i1 + 1], distances_[-1])))
+        distances = distances_
+    return distances[-1]
+
+def get_probability(err_dist,error,func,err,corr,total_count=None,word_counts=None):
+    if not total_count and not word_counts:
+        return 1 if  err_dist['deletion'][func(err, corr)]==0 else err_dist['deletion'][func(err, corr)]
+
+    channel_model =1 if  err_dist['deletion'][func(err, corr)]==0 else err_dist['deletion'][func(err, corr)]
+    prior = word_counts[corr] / total_count
+    return math.exp(math.log(channel_model) + math.log(prior))
+
 
 def correct_word(w, word_counts, err_dist, c=1):
+    word_small_distnace=[]
+    for k in word_counts:
+        #if levenshteinDistance(w,k)==0:
+         #   return w
+        if levenshteinDistance(w,k)==1:
+            word_small_distnace.append(k)
+    err=w
+    total_count=sum(word_counts.values())
+    probability_dict={}
+    for corr in word_small_distnace:
+        if len(err)<len(corr):
+            probability_dict[corr]=get_probability(err_dist,'deletion',diff_del,err,corr,total_count,word_counts)
+        elif len(err)>len(corr):
+            probability_dict[corr]=get_probability(err_dist,'insertion',diff_insertion,err,corr,total_count,word_counts)
+        else:
+            if set(err)!=set(corr):
+
+                probability_dict[corr] = get_probability(err_dist, 'substitution', diff_sub, err, corr, total_count,
+                                                         word_counts)
+            else:
+                flag=True
+                err_counter=Counter(err)
+                corr_counter=Counter(corr)
+                for k_err,v_err in err_counter.items():
+                    if v_err!=corr_counter[k_err]:
+                        probability_dict[corr] = get_probability(err_dist, 'substitution', diff_sub, err, corr,
+                                                                 total_count,
+                                                                 word_counts)
+                        flag=False
+                        break
+                if flag:
+                    probability_dict[corr] = get_probability(err_dist, 'transposition', diff_trans, err, corr, total_count,
+                                                             word_counts)
+
+
+    return max(probability_dict.items(), key=operator.itemgetter(1))[0]
+
     """ Returns the most probable correction for the specified word, given the specified prior error distribution.
 
     Args:
@@ -286,7 +358,78 @@ def correct_word(w, word_counts, err_dist, c=1):
     """
 
 
+
+def get_noisy_channel(err,corr,err_dist):
+    if len(err) < len(corr):
+        return get_probability(err_dist, 'deletion', diff_del, err, corr)
+    elif len(err) > len(corr):
+        return get_probability(err_dist, 'insertion', diff_insertion, err, corr)
+    else:
+        if set(err) != set(corr):
+
+            return get_probability(err_dist, 'substitution', diff_sub, err, corr)
+        else:
+            flag = True
+            err_counter = Counter(err)
+            corr_counter = Counter(corr)
+            for k_err, v_err in err_counter.items():
+                if v_err != corr_counter[k_err]:
+                    return get_probability(err_dist, 'substitution', diff_sub, err, corr)
+            return get_probability(err_dist, 'transposition', diff_trans, err, corr)
+
+
+def extract_n(lm):
+    """
+    Helper func to extract the n-1 out of the ngram Language Model
+    :param lm: Language Model
+    :return: (int) n-1 of the model
+    """
+    ngram_counter=[]
+    for ngram in lm:
+        ngram_counter.append(len(ngram))
+    counter=Counter(ngram_counter)
+    return counter.most_common(1)[0][0]+1
+
 def correct_sentence(s, lm, err_dist, c=1, alpha=0.95):
+    corpus = [s.split(' ')]
+    words = [re.findall(r"[\w']+|[\'\".,!?;#]", i) for i in corpus]
+    s = []
+    for index, x in enumerate(words):
+        s += ['<END>', '<START>']
+        for y in x:
+            normalized_word = normalization(y)
+            if normalized_word:
+                s.append(normalized_word)  # Normalizing each token see the function for the full doc
+
+        if index + 1 == len(words):
+            s += ['<END>', '<START>']
+
+    n=extract_n(lm)
+    ngrams_list = ngrams(s, n)
+    lexicon=get_lex(lm)
+    possible_words=defaultdict(list)
+    for err in s:
+        for corr in lexicon:
+            if levenshteinDistance(err, corr)<=1:
+                possible_words[err].append(corr)
+    distribution_dict=defaultdict(lambda: defaultdict(float))
+    for err,corrs in possible_words:
+        for corr in corrs:
+            if err==corr:
+                noisy_channel=alpha
+            else:
+                noisy_channel=get_noisy_channel(err,corr,err_dist)
+                noisy_channel=noisy_channel*(1-alpha)/len(corrs)
+            ngram=get_ngram(s,err,n)
+            if ngram in lm:
+                if corr in lm[ngram]:
+                    lm_prob=lm[ngram][corr]/len(lm)
+            else:
+                lm_prob=1-len(lm)+1
+            distribution_dict[err][corr]=noisy_channel*lm_prob
+    max(probability_dict.items(), key=operator.itemgetter(1))
+    print(2)
+
     """ Returns the most probable sentence given the specified sentence, language
     model, error distributions, maximal number of suumed erroneous tokens and likelihood for non-error.
 
@@ -303,3 +446,28 @@ def correct_sentence(s, lm, err_dist, c=1, alpha=0.95):
     Returns:
         The most probable sentence (str)
     """
+
+def get_ngram(s, err, n):
+    ngram = []
+    index = s.index(err) - 1
+    for i in range(n - 1):
+        if index < 0:
+            if index % 2 == 0:
+                ngram.append("<END>")
+            if index % 2 != 0:
+                ngram.append("<START>")
+        else:
+            ngram.append(s[index])
+
+        index -= 1
+    ngram.reverse()
+    ngram=tuple(ngram)
+    return ngram
+
+
+
+def get_lex(lm):
+    lex=set()
+    for ngram in lm:
+        lex.update([normalization(x) for x in ngram if x != '<START>' and x!='<END>'])
+    return lex

@@ -1,16 +1,30 @@
 from assignment2 import *
+import datetime
+data_folder = ""#"data_test\\"
 
+'''
+time=datetime.datetime.now()
+list=['big.txt']
+error_list=['data_test/commmon_errors.txt']
+alex2=learn_language_model(list,n=3)
+'''
 
-def learn_language_model(files, n=3, lm=None):
-    words = '<END> <START> w1 w2 w3 w1 w2 w4 <END> <START>'
+def get_ngram(s, err, n):
+    ngram = []
+    index = s.index(err) - 1
+    for i in range(n - 1):
+        if index < 0:
+            if index % 2 == 0:
+                ngram.append("<END>")
+            if index % 2 != 0:
+                ngram.append("<START>")
+        else:
+            ngram.append(s[index])
 
-    words = words.split(' ')
+        index -= 1
+    ngram.reverse()
+    ngram=tuple(ngram)
+    return ngram
 
-    ngrams_list = ngrams(words, n)
-    ngram_dict = defaultdict(lambda: defaultdict(int))
-    for grams in ngrams_list:
-        ngram_dict[tuple(grams[:-1])][grams[-1]] += 1
-    ngram_dict = default_to_regular(ngram_dict)
-
-alex=create_error_distribution()
+alex=get_ngram('alex is cool but i dont know what happended'.split(' '),'is',6)
 print(alex)
