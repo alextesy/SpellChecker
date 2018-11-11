@@ -65,6 +65,7 @@ def normalization(word):
     if not check_numbers_letters(word):
         return None
     word=word.lower()
+    word=word.replace('_','')
     set=('http','https','www','html') #Work in progress
     if word in set:
         return None
@@ -119,7 +120,7 @@ def create_word_list(file_list):
     corpus = []
     for file in file_list:
         corpus.append(proccess_file(file))
-    words = [re.findall(r"[\w']+|[\'\".,!?;#]", i) for i in corpus]
+    words = [re.findall(r"[\w']+|[\'\".,!?;#_]", i) for i in corpus]
     temp = []
     for index,x in enumerate(words):
         temp += ['<END>', '<START>']
@@ -277,22 +278,63 @@ def create_error_distribution(errors_files, lexicon):
 
     """
 
-def levenshteinDistance(s1, s2):
-    if len(s1) > len(s2):
-        s1, s2 = s2, s1
-    distances = range(len(s1) + 1)
-    for i2, c2 in enumerate(s2):
-        distances_ = [i2+1]
-        for i1, c1 in enumerate(s1):
-            if c1 == c2:
-                distances_.append(distances[i1])
-            else:
-                if i1+1<len(s1) and i2+1<len(s2):
-                    if c1==s2[i2+1] and c2==s1[i1+1]:
-                        return 1
-                distances_.append(1 + min((distances[i1], distances[i1 + 1], distances_[-1])))
-        distances = distances_
-    return distances[-1]
+def levenshteinDistance(a, b):
+    # "Infinity" -- greater than maximum possible edit distance
+    # Used to prevent transpositions for first characters
+    INF = len(a) + len(b)
+
+    # Matrix: (M + 2) x (N + 2)
+    matrix  = [[INF for n in range(len(b) + 2)]]
+    matrix += [[INF] + list(range(len(b) + 1))]
+    matrix += [[INF, m] + [0] * len(b) for m in range(1, len(a) + 1)]
+
+    # Holds last row each element was encountered: DA in the Wikipedia pseudocode
+    last_row = {}
+
+    # Fill in costs
+    for row in range(1, len(a) + 1):
+        # Current character in a
+        ch_a = a[row-1]
+
+        # Column of last match on this row: DB in pseudocode
+        last_match_col = 0
+
+        for col in range(1, len(b) + 1):
+            # Current character in b
+            ch_b = b[col-1]
+
+            # Last row with matching character
+            last_matching_row = last_row.get(ch_b, 0)
+
+            # Cost of substitution
+            cost = 0 if ch_a == ch_b else 1
+
+            # Compute substring distance
+            matrix[row+1][col+1] = min(
+                matrix[row][col] + cost, # Substitution
+                matrix[row+1][col] + 1,  # Addition
+                matrix[row][col+1] + 1,  # Deletion
+
+                # Transposition
+                # Start by reverting to cost before transposition
+                matrix[last_matching_row][last_match_col]
+                    # Cost of letters between transposed letters
+                    # 1 addition + 1 deletion = 1 substitution
+                    + max((row - last_matching_row - 1),
+                          (col - last_match_col - 1))
+                    # Cost of the transposition itself
+                    + 1)
+
+            # If there was a match, update last_match_col
+            if cost == 0:
+                last_match_col = col
+
+        # Update last row for current character
+        last_row[ch_a] = row
+
+    # Return last element
+    return matrix[-1][-1]
+
 
 def get_probability(err_dist,error,func,err,corr,total_count=None,word_counts=None):
     if not total_count and not word_counts:
@@ -308,7 +350,8 @@ def correct_word(w, word_counts, err_dist, c=1):
     for k in word_counts:
         #if levenshteinDistance(w,k)==0:
          #   return w
-        if levenshteinDistance(w,k)==1:
+        dist=levenshteinDistance(w,k)
+        if dist==1:
             word_small_distnace.append(k)
     err=w
     total_count=sum(word_counts.values())
@@ -391,7 +434,7 @@ def extract_n(lm):
     return counter.most_common(1)[0][0]+1
 
 def correct_sentence(s, lm, err_dist, c=1, alpha=0.95):
-    corpus = [s.split(' ')]
+    corpus = [s]
     words = [re.findall(r"[\w']+|[\'\".,!?;#]", i) for i in corpus]
     s = []
     for index, x in enumerate(words):
@@ -413,7 +456,9 @@ def correct_sentence(s, lm, err_dist, c=1, alpha=0.95):
             if levenshteinDistance(err, corr)<=1:
                 possible_words[err].append(corr)
     distribution_dict=defaultdict(lambda: defaultdict(float))
-    for err,corrs in possible_words:
+    result_dict=defaultdict(tuple)
+
+    for err,corrs in possible_words.items():
         for corr in corrs:
             if err==corr:
                 noisy_channel=alpha
@@ -421,14 +466,31 @@ def correct_sentence(s, lm, err_dist, c=1, alpha=0.95):
                 noisy_channel=get_noisy_channel(err,corr,err_dist)
                 noisy_channel=noisy_channel*(1-alpha)/len(corrs)
             ngram=get_ngram(s,err,n)
+            if err=='died':
+                print('1')
             if ngram in lm:
                 if corr in lm[ngram]:
-                    lm_prob=lm[ngram][corr]/len(lm)
+                    lm_prob=lm[ngram][corr]/sum(lm[ngram].values())
+                else:
+                    lm_prob = 1 / (len(lm) + 1)
+
             else:
-                lm_prob=1-len(lm)+1
-            distribution_dict[err][corr]=noisy_channel*lm_prob
-    max(probability_dict.items(), key=operator.itemgetter(1))
-    print(2)
+                lm_prob=1/(len(lm)+1)
+            distribution_dict[err][corr]=math.exp(math.log(noisy_channel)+math.log(lm_prob))
+        max_prob_err=max(distribution_dict[err].items(), key=operator.itemgetter(1))
+        if max_prob_err[0]!=err:
+            result_dict[err]=max_prob_err
+    if len(result_dict)==0:
+        return ' '.join(s[2:-2])
+    max_tuple=tuple()
+    max_prob=0
+    for k,v in result_dict.items():
+        if v[1]>max_prob:
+            max_prob=v[1]
+            max_tuple=(k,v[0])
+
+    s=' '.join(s[2:-2]).replace(max_tuple[0],max_tuple[1])
+    return s
 
     """ Returns the most probable sentence given the specified sentence, language
     model, error distributions, maximal number of suumed erroneous tokens and likelihood for non-error.
